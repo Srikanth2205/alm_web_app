@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Work Management Application">
+  
+  <title>Work Management</title>
+
+  <!-- Cache control -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  
+  <!-- Preload critical assets -->
+  <link rel="preload" href="main.dart.js" as="script">
+  <link rel="preload" href="flutter.js" as="script">
+
+  <script>
+    var serviceWorkerVersion = null;
+    
+    // Add loading progress
+    var loadingIndicator = {
+      init: function() {
+        this.loadingText = document.querySelector('#loading-text');
+        this.progress = 0;
+      },
+      updateProgress: function(progress) {
+        this.progress = progress;
+        this.loadingText.textContent = `Loading Work Management... ${Math.round(progress * 100)}%`;
+      }
+    };
+  </script>
+
+  <style>
+    body {
+      margin: 0;
+      background-color: #fafafa;
+    }
+    .loading {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      margin: 0;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-family: sans-serif;
+      font-size: 18px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <div class="loading">
+    <div id="loading-text">Loading Work Management...</div>
+  </div>
+
+  <script src="flutter.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/9.x.x/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.x.x/firebase-auth.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.x.x/firebase-firestore.js"></script>
+  <script>
+    window.addEventListener('load', function() {
+      loadingIndicator.init();
+
+      // Initialize Flutter with progress tracking
+      _flutter.loader.loadEntrypoint({
+        serviceWorker: {
+          serviceWorkerVersion: serviceWorkerVersion,
+        },
+        onEntrypointLoaded: async function(engineInitializer) {
+          loadingIndicator.updateProgress(0.5);
+          let appRunner = await engineInitializer.initializeEngine({
+            // Optimize for web
+            renderer: 'html',
+            useColorEmoji: false
+          });
+          loadingIndicator.updateProgress(0.8);
+          await appRunner.runApp();
+          document.querySelector('.loading').remove();
+        }
+      });
+    });
+  </script>
+</body>
+</html>
