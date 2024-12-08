@@ -15,12 +15,16 @@ class SessionState {
   final Map<String, ParticipantState> participants;
   final bool votesRevealed;
   final List<TaskData> tasks;
+  final bool isTimerActive;
+  final DateTime? timerEndTime;
 
   SessionState({
     required this.taskName,
     required this.participants,
     required this.votesRevealed,
     required this.tasks,
+    this.isTimerActive = false,
+    this.timerEndTime,
   });
 
   factory SessionState.fromJson(Map<String, dynamic> json) {
@@ -37,6 +41,10 @@ class SessionState {
               (t) => TaskData.fromJson(t as Map<String, dynamic>))
           .toList() ??
           [],
+      isTimerActive: json['isTimerActive'] as bool? ?? false,
+      timerEndTime: json['timerEndTime'] != null 
+          ? DateTime.parse(json['timerEndTime'] as String)
+          : null,
     );
   }
 
@@ -47,6 +55,8 @@ class SessionState {
     ),
     'votesRevealed': votesRevealed,
     'tasks': tasks.map((t) => t.toJson()).toList(),
+    'isTimerActive': isTimerActive,
+    'timerEndTime': timerEndTime?.toIso8601String(),
   };
 }
 
@@ -101,12 +111,70 @@ class TaskData {
 
 class SessionService {
   static const String _tag = 'SessionService';
+  static const Duration defaultPollInterval = Duration(milliseconds: 500);
+  
   final _sessionController = StreamController<Map<String, dynamic>>.broadcast();
-  final Map<String, StreamSubscription> _subscriptions = {};
+  Timer? _pollTimer;
+  bool _useFallback = false;
+  String? _lastKnownState;
+  final Duration pollInterval;
 
   static final SessionService _instance = SessionService._internal();
   factory SessionService() => _instance;
-  SessionService._internal();
+  
+  SessionService._internal({this.pollInterval = defaultPollInterval}) {
+    _initCommunication();
+  }
+
+  void _initCommunication() {
+    try {
+      debugPrint('[$_tag] Initializing communication...');
+      _useFallback = true;
+      _initPolling();
+    } catch (e) {
+      debugPrint('[$_tag] Error initializing communication: $e');
+    }
+  }
+
+  void _initPolling() {
+    debugPrint('[$_tag] Initializing polling mechanism');
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(pollInterval, (timer) {
+      _checkForUpdates();
+    });
+  }
+
+  void _checkForUpdates() {
+    try {
+      final sessions = getSessionsFromStorage();
+      final currentState = json.encode(sessions);
+      
+      // Only broadcast if state has changed
+      if (_lastKnownState != currentState) {
+        debugPrint('[$_tag] State change detected, broadcasting updates');
+        _lastKnownState = currentState;
+        for (final sessionId in sessions.keys) {
+          _sessionController.add({
+            'sessionId': sessionId,
+            'state': sessions[sessionId],
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('[$_tag] Error during polling: $e');
+    }
+  }
+
+  void _notifyStateChange(String sessionId) {
+    final sessions = getSessionsFromStorage();
+    if (sessions.containsKey(sessionId)) {
+      final state = sessions[sessionId];
+      _sessionController.add({
+        'sessionId': sessionId,
+        'state': state,
+      });
+    }
+  }
 
   Future<void> createSession(String sessionId, String userName) async {
     debugPrint('\n[$_tag] ====== CREATING SESSION ======');
@@ -129,7 +197,7 @@ class SessionService {
     
     sessions[sessionId] = sessionData;
     _saveSessionsToStorage(sessions);
-    _broadcastUpdate(sessionId);
+    _notifyStateChange(sessionId);
     debugPrint('[$_tag] Session created successfully\n');
   }
 
@@ -166,7 +234,7 @@ class SessionService {
     debugPrint('Verified saved data: ${json.encode(getSessionsFromStorage())}');
 
     debugPrint('\n[$_tag] ====== BROADCASTING STATE ======');
-    _broadcastUpdate(sessionId);
+    _notifyStateChange(sessionId);
     debugPrint('\n[$_tag] Joined session successfully');
   }
 
@@ -181,16 +249,14 @@ class SessionService {
 
     final session = sessions[sessionId] as Map<String, dynamic>;
     
-    // First add the task
+    // Add the task
     final tasks = (session['tasks'] as List<dynamic>);
     tasks.add(task.toJson());
-    _saveSessionsToStorage(sessions);
-    _broadcastUpdate(sessionId);
     
-    // Then set it as the active task in a separate operation
+    // Set it as the active task
     session['taskName'] = task.name;
     
-    // Reset all votes when adding a new task
+    // Reset all votes
     final participants = session['participants'] as Map<String, dynamic>;
     for (var participant in participants.values) {
       participant['hasVoted'] = false;
@@ -198,9 +264,12 @@ class SessionService {
     }
     session['votesRevealed'] = false;
 
-    // Save and broadcast again with the updated task name
+    // Save changes
     _saveSessionsToStorage(sessions);
-    _broadcastUpdate(sessionId);
+    
+    // Force an immediate update
+    _notifyStateChange(sessionId);
+    
     debugPrint('[$_tag] Task added successfully\n');
   }
 
@@ -225,7 +294,7 @@ class SessionService {
     session['votesRevealed'] = false;
 
     _saveSessionsToStorage(sessions);
-    _broadcastUpdate(sessionId);
+    _notifyStateChange(sessionId);
     debugPrint('[$_tag] Task name updated successfully');
   }
 
@@ -235,7 +304,7 @@ class SessionService {
     final tasks = session['tasks'] as List<dynamic>;
     tasks.removeWhere((t) => t['name'] == taskName);
     _saveSessionsToStorage(sessions);
-    _broadcastUpdate(sessionId);
+    _notifyStateChange(sessionId);
   }
 
   Future<void> updateTaskEstimate(String sessionId, String taskName, String estimate) async {
@@ -245,7 +314,7 @@ class SessionService {
     final task = tasks.firstWhere((t) => t['name'] == taskName);
     task['estimate'] = estimate;
     _saveSessionsToStorage(sessions);
-    _broadcastUpdate(sessionId);
+    _notifyStateChange(sessionId);
   }
 
   Future<void> resetVotes(String sessionId) async {
@@ -258,7 +327,7 @@ class SessionService {
     }
     session['votesRevealed'] = false;
     _saveSessionsToStorage(sessions);
-    _broadcastUpdate(sessionId);
+    _notifyStateChange(sessionId);
   }
 
   Future<void> submitVote(String sessionId, String userName, String vote) async {
@@ -288,7 +357,7 @@ class SessionService {
     participant['vote'] = vote;
 
     _saveSessionsToStorage(sessions);
-    _broadcastUpdate(sessionId);
+    _notifyStateChange(sessionId);
     debugPrint('[$_tag] Vote submitted successfully');
   }
 
@@ -325,26 +394,6 @@ class SessionService {
     debugPrint('[$_tag] Saved to storage: $jsonString');
   }
 
-  void _broadcastUpdate(String sessionId) {
-    debugPrint('\n[$_tag] ====== BROADCASTING UPDATE ======');
-    final sessions = getSessionsFromStorage();
-    if (sessions.containsKey(sessionId)) {
-      final state = sessions[sessionId] as Map<String, dynamic>;
-      debugPrint('[$_tag] Broadcasting state:');
-      debugPrint(json.encode(state));
-      
-      try {
-        _sessionController.add({
-          'sessionId': sessionId,
-          'state': state,
-        });
-        debugPrint('[$_tag] Update broadcasted successfully');
-      } catch (e) {
-        debugPrint('[$_tag] Error broadcasting update: $e');
-      }
-    }
-  }
-
   Future<SessionState> getSessionState(String sessionId) async {
     debugPrint('\n[$_tag] ====== GETTING SESSION STATE ======');
     debugPrint('[$_tag] SessionId: $sessionId');
@@ -361,17 +410,66 @@ class SessionService {
     debugPrint('  - Participants: ${(session['participants'] as Map).keys.join(', ')}');
 
     // Force a broadcast update to ensure all clients are in sync
-    _broadcastUpdate(sessionId);
+    _notifyStateChange(sessionId);
     
     return SessionState.fromJson(session);
   }
 
+  Future<void> startVoteTimer(String sessionId) async {
+    debugPrint('[SessionService] Starting vote timer');
+    final sessions = getSessionsFromStorage();
+    if (!sessions.containsKey(sessionId)) {
+      throw SessionNotFoundException('Session $sessionId not found');
+    }
+
+    final session = sessions[sessionId] as Map<String, dynamic>;
+    session['isTimerActive'] = true;
+    session['timerEndTime'] = DateTime.now().add(const Duration(seconds: 10)).toIso8601String();
+    
+    _saveSessionsToStorage(sessions);
+    _notifyStateChange(sessionId);
+    debugPrint('[SessionService] Vote timer started');
+  }
+
+  Future<void> revealVotes(String sessionId) async {
+    debugPrint('\n[$_tag] ====== REVEALING VOTES ======');
+    final sessions = getSessionsFromStorage();
+    if (!sessions.containsKey(sessionId)) {
+      throw SessionNotFoundException('Session $sessionId not found');
+    }
+
+    final session = sessions[sessionId] as Map<String, dynamic>;
+    session['votesRevealed'] = true;
+    session['isTimerActive'] = false;
+    session['timerEndTime'] = null;
+
+    _saveSessionsToStorage(sessions);
+    _notifyStateChange(sessionId);
+    debugPrint('[$_tag] Votes revealed successfully');
+  }
+
+  Future<void> notifyAllVoted(String sessionId) async {
+    debugPrint('[SessionService] Notifying all voted and starting timer');
+    final sessions = getSessionsFromStorage();
+    if (!sessions.containsKey(sessionId)) {
+      throw SessionNotFoundException('Session $sessionId not found');
+    }
+
+    final session = sessions[sessionId] as Map<String, dynamic>;
+    session['allVoted'] = true;
+    
+    // Set timer state
+    session['isTimerActive'] = true;
+    session['timerEndTime'] = DateTime.now().add(const Duration(seconds: 10)).toIso8601String();
+    
+    _saveSessionsToStorage(sessions);
+    _notifyStateChange(sessionId);
+    debugPrint('[SessionService] Timer started after all votes received');
+  }
+
   @override
   void dispose() {
-    for (final subscription in _subscriptions.values) {
-      subscription.cancel();
-    }
-    _subscriptions.clear();
+    _pollTimer?.cancel();
     _sessionController.close();
   }
 }

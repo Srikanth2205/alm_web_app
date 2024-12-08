@@ -37,7 +37,6 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
   late StreamSubscription<SessionState> _sessionSubscription;
   final taskNameController = TextEditingController();
   String? _lastKnownState;
-  Timer? _refreshTimer;
   
   // State variables
   final List<TaskData> _tasks = [];
@@ -53,17 +52,13 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
   final List<String> cards = [
     '0', '½', '1', '2', '3', '5', '8', '13', '20', '40', '100', '?'
   ];
+  int _remainingSeconds = 0;
 
   @override
   void initState() {
     super.initState();
     debugPrint('\n[$_tag] Initializing state');
     _initializeSession();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (mounted) {
-        _refreshState();
-      }
-    });
   }
 
   Future<void> _initializeSession() async {
@@ -111,20 +106,15 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
 
   void _handleStreamUpdate(SessionState state) {
     debugPrint('\n[$_tag] ====== STREAM UPDATE RECEIVED ======');
-    debugPrint('[$_tag] Current state:');
-    debugPrint('  - Task Name: ${state.taskName}');
-    debugPrint('  - Tasks: ${state.tasks.map((t) => t.name).join(", ")}');
-    debugPrint('  - Participants: ${state.participants.keys.join(", ")}');
-
+    
     if (mounted) {
       setState(() {
-        // Update tasks first
+        // Update tasks
         _tasks.clear();
         _tasks.addAll(state.tasks);
         
-        // Explicitly update task name and log it
+        // Update task name
         if (state.taskName.isNotEmpty) {
-          debugPrint('[$_tag] Setting active task to: ${state.taskName}');
           _taskName = state.taskName;
         }
         
@@ -139,8 +129,56 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
         
         _showResults = state.votesRevealed;
       });
-      debugPrint('[$_tag] State updated successfully');
+
+      // Handle timer state separately
+      _handleTimerState(state);
     }
+  }
+
+  void _handleTimerState(SessionState state) {
+    if (state.isTimerActive && state.timerEndTime != null) {
+      debugPrint('[$_tag] Timer is active, end time: ${state.timerEndTime}');
+      final remaining = state.timerEndTime!.difference(DateTime.now()).inSeconds;
+      _remainingSeconds = remaining > 0 ? remaining : 0;
+      
+      if (_remainingSeconds > 0 && _countdownTimer == null) {
+        debugPrint('[$_tag] Starting countdown timer');
+        _startCountdown(state.timerEndTime!);
+      }
+      
+      if (_remainingSeconds <= 0) {
+        debugPrint('[$_tag] Timer completed, showing results');
+        _showResults = true;
+        _countdownTimer?.cancel();
+        _countdownTimer = null;
+      }
+    }
+  }
+
+  void _startCountdown(DateTime endTime) {
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        final remaining = endTime.difference(DateTime.now()).inSeconds;
+        setState(() {
+          _remainingSeconds = remaining > 0 ? remaining : 0;
+          debugPrint('[$_tag] Countdown: $_remainingSeconds seconds remaining');
+        });
+        
+        if (remaining <= 0) {
+          debugPrint('[$_tag] Countdown finished, revealing votes');
+          timer.cancel();
+          _countdownTimer = null;
+          setState(() {
+            _showResults = true;
+          });
+          // Auto-reveal votes when timer ends
+          if (widget.isModerator) {
+            _sessionService.revealVotes(widget.sessionId);
+          }
+        }
+      }
+    });
   }
 
   Future<void> _addTask(String taskName) async {
@@ -323,11 +361,11 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
       color: isSelected ? Colors.purple.shade100 : null,
       child: InkWell(
         onTap: isVotingEnabled 
-            ? () {
+            ? () async {
                 setState(() => _taskName = cards[index]);
-                _submitVote(cards[index]);
+                await _submitVote(cards[index]);
               }
-            : null, // Disable tap when no task is selected
+            : null,
         child: Stack(
           children: [
             Center(
@@ -359,13 +397,6 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
         ),
       ),
     );
-  }
-
-  void _submitVote(String vote) {
-    debugPrint('[$_tag] Submitting vote: $vote for user: ${widget.userName}');
-    setState(() => _taskName = vote);
-    _sessionService.submitVote(widget.sessionId, widget.userName, vote);
-    _checkAllVoted();
   }
 
   void _checkAllVoted() {
@@ -550,28 +581,10 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
   }
 
   Widget _buildVotingArea() {
-    if (_tasks.isEmpty) {
-      return Expanded(
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.hourglass_empty, size: 48, color: Colors.grey),
-              const SizedBox(height: 16),
-              Text(
-                'Waiting for moderator to create a task...',
-                style: TextStyle(color: Colors.grey.shade600),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
     return Expanded(
       child: Column(
         children: [
-          // Show current task for both moderator and attendee
+          // Current Task Display
           Container(
             padding: const EdgeInsets.all(16),
             color: Colors.purple.shade50,
@@ -588,33 +601,126 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
               ],
             ),
           ),
-          // Show voting cards only if there's an active task
-          if (_taskName?.isNotEmpty == true)
-            Expanded(
-              child: GridView.count(
-                crossAxisCount: 4,
-                padding: const EdgeInsets.all(16),
-                mainAxisSpacing: 16,
-                crossAxisSpacing: 16,
-                children: cards.map((card) {
-                  final isSelected = _participants[widget.userName]?.vote == card;
-                  return Card(
-                    elevation: isSelected ? 8 : 1,
-                    color: isSelected ? Colors.purple.shade100 : Colors.white,
-                    child: InkWell(
-                      onTap: () => _submitVote(card),
-                      child: Center(
-                        child: Text(
-                          card,
-                          style: TextStyle(
-                            fontSize: 24,
-                            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+
+          // Timer Display
+          if (_remainingSeconds > 0)
+            Container(
+              padding: const EdgeInsets.all(16),
+              margin: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade100,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                'Votes will be revealed in $_remainingSeconds seconds',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.deepOrange,
+                ),
+              ),
+            ),
+
+          // Results Display
+          if (_showResults && _participants.values.every((p) => p.hasVoted))
+            Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  margin: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.green.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.green.shade200),
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Expanded(
+                            child: Column(
+                              children: [
+                                const Text(
+                                  'Average',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                Text(
+                                  _calculateAverage(),
+                                  style: TextStyle(
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.green.shade700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            width: 1,
+                            height: 40,
+                            color: Colors.green.shade200,
+                          ),
+                          Expanded(
+                            child: Column(
+                              children: [
+                                const Text(
+                                  'Most Common',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                Text(
+                                  _calculateMostCommon(),
+                                  style: TextStyle(
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.green.shade700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (widget.isModerator)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 16),
+                          child: ElevatedButton(
+                            onPressed: _saveEstimate,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green,
+                              foregroundColor: Colors.white,
+                            ),
+                            child: const Text('Save Estimate'),
                           ),
                         ),
-                      ),
-                    ),
-                  );
-                }).toList(),
+                    ],
+                  ),
+                ),
+                
+                // Add the analytics widget here
+                _buildVoteAnalytics(),
+              ],
+            ),
+
+          // Voting Cards
+          if (!_showResults)
+            Expanded(
+              child: Center(
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.center,
+                  children: List<Widget>.from(cards.map((card) {
+                    final isSelected = _participants[widget.userName]?.vote == card;
+                    return _buildVoteCard(card, isSelected);
+                  })),
+                ),
               ),
             ),
         ],
@@ -737,8 +843,9 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
   }
 
   Future<void> _refreshState() async {
+    debugPrint('\n[$_tag] ====== MANUALLY REFRESHING STATE ======');
     try {
-      // Use the public method instead
+      // Use the public method instead of private one
       final sessions = _sessionService.getSessionsFromStorage();
       final currentState = json.encode(sessions[widget.sessionId]);
       
@@ -747,9 +854,25 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
         _lastKnownState = currentState;
         final state = await _sessionService.getSessionState(widget.sessionId);
         _handleStreamUpdate(state);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('State refreshed successfully'),
+              duration: Duration(seconds: 1),
+            ),
+          );
+        }
       }
     } catch (e) {
-      debugPrint('[$_tag] Error during periodic refresh: $e');
+      debugPrint('[$_tag] Error refreshing state: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error refreshing: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -840,9 +963,296 @@ class _PlanningPokerPageState extends State<PlanningPokerPage> {
   @override
   void dispose() {
     _sessionSubscription.cancel();
-    _refreshTimer?.cancel();
+    _countdownTimer?.cancel();
     taskNameController.dispose();
     super.dispose();
+  }
+
+  // Add these helper methods
+  String _calculateAverage() {
+    final votes = _participants.values
+        .where((p) => p.hasVoted && p.vote != null && p.vote != '?')
+        .map((p) => _parseVote(p.vote!))
+        .toList();
+    
+    if (votes.isEmpty) return 'N/A';
+    final average = votes.reduce((a, b) => a + b) / votes.length;
+    return average.toStringAsFixed(1);
+  }
+
+  String _calculateMostCommon() {
+    final votes = _participants.values
+        .where((p) => p.hasVoted && p.vote != null)
+        .map((p) => p.vote!)
+        .toList();
+    
+    if (votes.isEmpty) return 'N/A';
+    return votes.mostCommon();
+  }
+
+  double _parseVote(String vote) {
+    if (vote == '½') return 0.5;
+    try {
+      return double.parse(vote);
+    } catch (e) {
+      return 0.0;
+    }
+  }
+
+  Future<void> _submitVote(String vote) async {
+    debugPrint('[$_tag] Submitting vote: $vote for user: ${widget.userName}');
+    setState(() => _taskName = vote);
+    await _sessionService.submitVote(widget.sessionId, widget.userName, vote);
+    
+    // Check if all participants have voted
+    final allVoted = _participants.values.every((p) => p.hasVoted);
+    if (allVoted) {
+      debugPrint('[$_tag] All participants have voted');
+      // Start timer for both moderator and attendees
+      if (widget.isModerator) {
+        await _sessionService.startVoteTimer(widget.sessionId);
+        debugPrint('[$_tag] Vote timer started by moderator');
+      } else {
+        // Notify moderator that all votes are in
+        debugPrint('[$_tag] All votes in, notifying moderator');
+        await _sessionService.notifyAllVoted(widget.sessionId);
+      }
+    }
+  }
+
+  // Add the vote card builder
+  Widget _buildVoteCard(String card, bool isSelected) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      margin: const EdgeInsets.all(4),
+      decoration: _buildCardDecoration(isSelected: isSelected),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => _submitVote(card),
+          child: Container(
+            width: 80,
+            height: 120,
+            padding: const EdgeInsets.all(8),
+            child: Center(
+              child: Text(
+                card,
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                  color: isSelected ? Colors.blue.shade700 : Colors.black87,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Add these new methods for analytics
+  Map<String, int> _calculateVoteDistribution() {
+    final distribution = <String, int>{};
+    final votes = _participants.values
+        .where((p) => p.hasVoted && p.vote != null)
+        .map((p) => p.vote!)
+        .toList();
+
+    for (var vote in votes) {
+      distribution[vote] = (distribution[vote] ?? 0) + 1;
+    }
+    return distribution;
+  }
+
+  Widget _buildVoteAnalytics() {
+    final distribution = _calculateVoteDistribution();
+    final totalVotes = distribution.values.fold(0, (sum, count) => sum + count);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.blue.shade50,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.blue.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Vote Distribution',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 16),
+          ...distribution.entries.map((entry) {
+            final percentage = (entry.value / totalVotes * 100).toStringAsFixed(1);
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      SizedBox(
+                        width: 40,
+                        child: Text(
+                          entry.key,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Stack(
+                          children: [
+                            Container(
+                              height: 24,
+                              decoration: BoxDecoration(
+                                color: Colors.blue.shade100,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            FractionallySizedBox(
+                              widthFactor: entry.value / totalVotes,
+                              child: Container(
+                                height: 24,
+                                decoration: BoxDecoration(
+                                  color: Colors.blue.shade400,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      SizedBox(
+                        width: 100,
+                        child: Text(
+                          ' $percentage% (${entry.value})',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            );
+          }).toList(),
+        ],
+      ),
+    );
+  }
+
+  // Add this method for a gradient background
+  BoxDecoration _buildGradientBackground() {
+    return BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          Colors.blue.shade50,
+          Colors.white,
+          Colors.blue.shade50,
+        ],
+      ),
+    );
+  }
+
+  // Add this method for card styling
+  BoxDecoration _buildCardDecoration({bool isSelected = false}) {
+    return BoxDecoration(
+      color: isSelected ? Colors.blue.shade100 : Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(0.1),
+          blurRadius: 8,
+          offset: const Offset(0, 2),
+        ),
+      ],
+      border: Border.all(
+        color: isSelected ? Colors.blue : Colors.grey.shade300,
+        width: isSelected ? 2 : 1,
+      ),
+    );
+  }
+
+  // Update participant list styling
+  Widget _buildParticipantList() {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 5,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Participants',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: Colors.blue.shade700,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _participants.entries.map((entry) {
+              final hasVoted = entry.value.hasVoted;
+              return Chip(
+                avatar: Icon(
+                  hasVoted ? Icons.check_circle : Icons.person,
+                  color: hasVoted ? Colors.green : Colors.grey,
+                  size: 18,
+                ),
+                label: Text(entry.key),
+                backgroundColor: hasVoted ? Colors.green.shade50 : Colors.grey.shade50,
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Add a timer indicator widget
+  Widget _buildTimerIndicator(int secondsRemaining) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.orange.shade200),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.timer, color: Colors.orange.shade700),
+          const SizedBox(width: 8),
+          Text(
+            'Revealing in $secondsRemaining seconds',
+            style: TextStyle(
+              color: Colors.orange.shade700,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
